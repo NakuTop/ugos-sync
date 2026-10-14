@@ -1,0 +1,19 @@
+{
+  "scope": [
+    "independent vendor-engine supervisor",
+    "authenticated NAS heartbeat every 8 seconds",
+    "cloud account/device login and refresh",
+    "native local/NAS folder mapping picker",
+    "native menu bar sync status",
+    "public source release without vendor binaries or private data"
+  ],
+  "acceptance": [
+    "GUI exited and authenticated heartbeat established",
+    "new harmless file and modification read back from NAS with matching SHA-256",
+    "heartbeat reconnect after controlled connection closure",
+    "source folder and NAS destination selectors work",
+    "credentials excluded from source and release",
+    "build/tests and public GitHub repository verified"
+  ],
+  "created_at": "2026-10-14T09:47:11.125431+00:00"
+}
