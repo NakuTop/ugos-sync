@@ -44,10 +44,10 @@ Task {
                 let client=try NASClient(session:identity)
                 let remote=try await client.request(method:"GET",route:"/rest/system/status")
                 guard let remoteID=remote["myID"].string else { throw SyncError.response }
-                
+
                 let config=try await local.request(method:"GET",route:"/rest/config")
                 guard config["devices"].array?.contains(where:{$0["deviceID"].string==remoteID})==true else { throw SyncError.authentication }
-                
+
                 selected=client
                 if argument("--session-import") != nil { try SessionStore.saveNAS(identity) }
                 break
