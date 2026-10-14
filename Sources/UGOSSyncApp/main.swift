@@ -347,6 +347,7 @@ struct NASDirectoryRow: View {
     var item: NSStatusItem!
     let popover = NSPopover()
     var window: NSWindow?
+    var reopenObserver:NSObjectProtocol?
     func applicationDidFinishLaunching(_ notification: Notification) {
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         item.autosaveName = "UGOSSyncStatus"
@@ -357,6 +358,13 @@ struct NASDirectoryRow: View {
         let menu=NSMenu();let appMenu=NSMenu();let parent=NSMenuItem();parent.submenu=appMenu;menu.addItem(parent)
         let status=NSMenuItem(title:"显示同步状态",action:#selector(toggle),keyEquivalent:"s");status.keyEquivalentModifierMask=[.command,.shift];status.target=self;appMenu.addItem(status)
         appMenu.addItem(NSMenuItem(title:"退出界面",action:#selector(NSApplication.terminate(_:)),keyEquivalent:"q"));NSApp.mainMenu=menu
+        reopenObserver=DistributedNotificationCenter.default().addObserver(forName:Notification.Name("com.nakutop.ugos-sync.reopen"),object:nil,queue:.main) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                if self.window?.isVisible == true { self.window?.makeKeyAndOrderFront(nil) } else if !self.popover.isShown { self.showStatus() }
+                NSApp.activate(ignoringOtherApps:true)
+            }
+        }
         if CommandLine.arguments.contains("--settings") { showSettings() } else if !CommandLine.arguments.contains("--background") { showStatus() }
     }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { if window?.isVisible != true && !popover.isShown { showStatus() }; return false }
@@ -373,6 +381,7 @@ struct NASDirectoryRow: View {
 }
 let app = NSApplication.shared
 if let id=Bundle.main.bundleIdentifier, let existing=NSRunningApplication.runningApplications(withBundleIdentifier:id).first(where:{$0.processIdentifier != getpid()}) {
+    DistributedNotificationCenter.default().postNotificationName(Notification.Name("com.nakutop.ugos-sync.reopen"),object:nil,userInfo:nil,deliverImmediately:true)
     existing.activate(options:[.activateIgnoringOtherApps]);exit(0)
 }
 let delegate = MainActor.assumeIsolated { AppDelegate() }
