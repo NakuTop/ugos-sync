@@ -3,7 +3,7 @@ import Darwin
 import SwiftUI
 import UGOSSyncCore
 
-struct QueueEntry: Identifiable {
+struct QueueEntry: Identifiable, Codable {
     let id: String
     let name: String
     let folder: String
@@ -27,10 +27,13 @@ struct QueueEntry: Identifiable {
     private var local: LocalEngineClient?
     private var nas: NASClient?
     private let auth = AuthenticationClient()
+    private var recentEntries: [QueueEntry] = []
+    private let recentURL = PrivateFiles.root.appendingPathComponent("recent-files.json")
     private var refreshing = false
     private var timer: Timer?
     init() {
         if let stored = try? SessionStore.loadNAS() { session = stored; nas = try? NASClient(session: stored) }
+        if let data = try? PrivateFiles.read(recentURL), let saved = try? JSONDecoder().decode([QueueEntry].self, from: data) { recentEntries = Array(saved.prefix(3)); entries = recentEntries }
         reloadEngine()
         Task { await refresh() }
         timer = Timer.scheduledTimer(withTimeInterval: 6, repeats: true) { [weak self] _ in Task { @MainActor in await self?.refresh() } }
@@ -85,13 +88,13 @@ struct QueueEntry: Identifiable {
                             let result = try await local.request(method: "GET", route: "/rest/db/remoteneed?folder=\(encoded)&device=\(escaped)&page=1&perpage=60")
                             let files = result.array ?? result["files"].array
                             guard let files else { throw SyncError.response }
-                            for file in files { next.append(entry(file, folder: label, id: id + peer, direction: "传到 NAS", state: "等待 NAS 接收")) }
+                            for file in files { next.append(entry(file, folder: label, id: id, direction: "传到 NAS", state: "等待 NAS 接收")) }
                         } catch { unavailableQueue = true }
                     }
                 }
             }
             total = max(total, next.count)
-            entries = next; pending = total
+            pending = total
             status = connected ? (configured.isEmpty ? "尚未添加同步文件夹" : (configured.allSatisfy { $0["paused"].bool == true } ? "同步已暂停" : (total > 0 ? "\(total) 项待同步" : "同步已完成"))) : "正在等待 NAS 连接"
             error = unavailableQueue ? "部分文件队列暂时无法读取，完成状态以可读的引擎数据为准。" : nil
             if connected && folderErrors { status="目录同步有错误";error="请检查文件夹权限或可用空间。" }
@@ -104,7 +107,30 @@ struct QueueEntry: Identifiable {
                 else if state != "online" || Date().timeIntervalSince1970-Double(daemon["updatedAt"].int)>30 { status="后台连接需要检查";connected=false;self.error="请在同步设置中检查 NAS 登录，或重新启动后台服务。" }
             } else { status="后台尚未启动";connected=false }
             if session == nil { status="请先连接 NAS";connected=false }
-        } catch { connected = false; status = "同步引擎暂时不可用"; self.error = "请稍后刷新，或在设置中检查连接。"; entries = []; pending = 0 }
+            // Disk events provide actual file names even when a transfer finishes between polls.
+            var candidates: [QueueEntry] = []
+            if let events = try? await local.request(method: "GET", route: "/rest/events/disk?since=0&limit=100&timeout=0") {
+                for event in (events.array ?? []).reversed() {
+                    let data = event["data"]
+                    guard let folderID = data["folder"].string,
+                          let folder = configured.first(where: { $0["id"].string == folderID }),
+                          let path = data["path"].string, data["type"].string != "dir" else { continue }
+                    let direction = event["type"].string == "RemoteChangeDetected" ? "从 NAS 接收" : "传到 NAS"
+                    candidates.append(QueueEntry(id: folderID + direction + path, name: path, folder: Self.label(folder), direction: direction, state: "未同步", size: 0))
+                }
+            }
+            let confirmed = connected && error == nil && !scanning && !folderErrors && remoteReady && total == 0 && !configured.contains(where: { $0["paused"].bool == true })
+            var seen = Set<String>()
+            let ordered = next + candidates + recentEntries
+            recentEntries = Array(ordered.filter { seen.insert($0.id).inserted }.prefix(3)).map { item in
+                let waiting = next.contains(where: { $0.id == item.id })
+                return QueueEntry(id: item.id, name: item.name, folder: item.folder, direction: item.direction,
+                                  state: waiting ? "未同步" : (confirmed ? "已同步" : (item.state == "已同步" ? "已同步" : "未同步")), size: item.size)
+            }
+            entries = recentEntries
+            if let data = try? JSONEncoder().encode(recentEntries) { try? PrivateFiles.write(data, to: recentURL) }
+
+        } catch { connected = false; status = "同步引擎暂时不可用"; self.error = "请稍后刷新，或在设置中检查连接。"; entries = recentEntries; pending = 0 }
     }
     static func label(_ folder: JSON) -> String {
         let raw=folder["label"].string ?? URL(fileURLWithPath:folder["path"].string ?? "").lastPathComponent
@@ -189,16 +215,16 @@ struct StatusView: View {
             Divider()
             if let error = model.error { Text(error).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
             if model.entries.isEmpty {
-                VStack(spacing: 8) { Image(systemName: model.status == "同步已完成" && model.error == nil ? "checkmark.circle" : "clock").font(.system(size: 30)).foregroundStyle(.secondary); Text(model.status == "同步已完成" && model.error == nil ? "所有文件均已同步" : (model.pending > 0 ? "文件列表暂未返回" : "等待同步状态")).font(.subheadline) }.frame(maxWidth: .infinity).padding(.vertical, 24)
+                Text("暂无最近同步文件，文件发生变化后将在这里显示。").font(.subheadline).foregroundStyle(.secondary).frame(maxWidth: .infinity).padding(.vertical, 24)
             } else {
                 ScrollView { LazyVStack(alignment: .leading, spacing: 14) { ForEach(model.entries) { item in
                     HStack(alignment: .top, spacing: 10) {
                         Image(systemName: item.direction == "传到 NAS" ? "arrow.up.doc" : "arrow.down.doc").foregroundStyle(.secondary)
-                        VStack(alignment: .leading, spacing: 4) { Text(item.name).font(.system(size: 12, weight: .medium)).lineLimit(2); Text("\(item.folder) · \(item.direction)").font(.caption).foregroundStyle(.secondary); Text(item.state).font(.caption2).foregroundStyle(.secondary) }
+                        VStack(alignment: .leading, spacing: 4) { Text(item.name).font(.system(size: 12, weight: .medium)).lineLimit(2); Text("\(item.folder) · \(item.direction)").font(.caption).foregroundStyle(.secondary); Text(item.state).font(.caption2).foregroundStyle(item.state == "已同步" ? Color.green : Color.orange) }
                         Spacer(); if item.size > 0 { Text(ByteCountFormatter.string(fromByteCount: Int64(item.size), countStyle: .file)).font(.caption2).foregroundStyle(.secondary) }
                     }
                 } }.padding(.vertical, 2) }.frame(maxHeight: 330)
-                Text("每个方向最多显示前 60 项；每 6 秒更新").font(.caption2).foregroundStyle(.tertiary)
+                Text("最近三个同步文件 · 每 6 秒更新").font(.caption2).foregroundStyle(.tertiary)
             }
             Divider()
             HStack { Button("同步设置…", action: settings); Spacer(); Button("退出界面") { NSApp.terminate(nil) }.buttonStyle(.borderless).foregroundStyle(.secondary) }
